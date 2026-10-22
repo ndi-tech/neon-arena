@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Neon Grid Arena</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { background: #050505; color: #fff; font-family: 'Courier New', monospace; text-align: center; margin: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
+        #scoreboard { display: flex; justify-content: space-between; width: 600px; font-size: 24px; margin-bottom: 10px; font-weight: bold; text-shadow: 0 0 10px currentColor; }
+        #p1-score { color: #00ffcc; }
+        #p2-score { color: #ff00ff; }
+        #canvas-container { position: relative; }
+        canvas { border: 3px solid #0ff; box-shadow: 0 0 20px #0ff, inset 0 0 20px #0ff; background: #000; transition: transform 0.05s; }
+        .shake { animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both; }
+        @keyframes shake {
+            10%, 90% { transform: translate3d(-2px, 0, 0); }
+            20%, 80% { transform: translate3d(4px, 0, 0); }
+            30%, 50%, 70% { transform: translate3d(-6px, 0, 0); }
+            40%, 60% { transform: translate3d(6px, 0, 0); }
+        }
+        #ui { margin-bottom: 20px; z-index: 10; display: flex; flex-direction: column; align-items: center; gap: 10px;}
+        .input-group { display: flex; gap: 10px; }
+        input { padding: 10px; font-size: 16px; background: #111; color: #0ff; border: 2px solid #0ff; outline: none; text-transform: uppercase; text-align: center; width: 120px; letter-spacing: 2px;}
+        button { padding: 10px 20px; font-size: 16px; background: #0ff; color: #000; border: none; cursor: pointer; font-weight: bold; transition: 0.2s; text-transform: uppercase;}
+        button:hover { background: #fff; box-shadow: 0 0 15px #fff; }
+        #status { color: #fff; font-size: 18px; margin-top: 15px; text-shadow: 0 0 10px #0ff; min-height: 20px;}
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div class="input-group" id="start-controls">
+            <input type="text" id="roomCode" placeholder="CODE" maxlength="4" />
+            <button onclick="joinRoom()">Join Game</button>
+            <button onclick="createRoom()">Create Room</button>
+            <button onclick="startSolo()" style="background: #ff00ff; color: #fff;">Practice Solo</button>
+        </div>
+        <button id="restartBtn" class="hidden" onclick="restartGame()">Play Again</button>
+        <p id="status">Use WASD or Arrow Keys to move</p>
+    </div>
+    <div id="scoreboard" class="hidden">
+        <div id="p1-score">P1 (WASD): 0</div>
+        <div id="p2-score">P2 (Arrows): 0</div>
+    </div>
+    <div id="canvas-container">
+        <canvas id="game" width="600" height="600"></canvas>
+    </div>
+    <script>
+        const socket = io();
+        const canvas = document.getElementById('game');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('canvas-container');
+        let currentRoom = null;
+        let isSolo = false;
+
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        const audioCtx = new AudioContext();
+
+        function playSound(type) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            if (type === 'turn') {
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(300, audioCtx.currentTime);
+                gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+            } else if (type === 'powerup') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(800, audioCtx.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.3);
+            } else if (type === 'crash') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(50, audioCtx.currentTime + 0.3);
+                gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.4);
+            }
+        }
+
+        socket.on('roomCreated', (code) => { 
+            currentRoom = code; 
+            if(isSolo) {
+                socket.emit('startSolo', code);
+            } else {
+                document.getElementById('status').innerText = 'ROOM: ' + code + '. Send this code to a friend!'; 
+            }
+        });
+
+        socket.on('gameStart', (room) => { 
+            document.getElementById('start-controls').classList.add('hidden');
+            document.getElementById('restartBtn').classList.add('hidden');
+            document.getElementById('scoreboard').classList.remove('hidden');
+            document.getElementById('status').innerText = '';
+        });
+
+        socket.on('stateUpdate', (room) => { 
+            render(room); 
+        });
+
+        socket.on('errorMsg', (msg) => { 
+            document.getElementById('status').innerText = msg; 
+            setTimeout(() => { document.getElementById('status').innerText = 'Use WASD or Arrow Keys to move'; }, 3000);
+        });
+
+        socket.on('crashEffect', () => {
+            playSound('crash');
+            container.classList.remove('shake');
+            void container.offsetWidth; 
+            container.classList.add('shake');
+        });
+
+        function createRoom() { 
+            isSolo = false;
+            socket.emit('createRoom'); 
+        }
+        
+        function startSolo() { 
+            isSolo = true;
+            socket.emit('createRoom'); 
+        }
+
+        function joinRoom() { 
+            const code = document.getElementById('roomCode').value.toUpperCase();
+            if(code) socket.emit('joinRoom', code); 
+        }
+
+        function restartGame() {
+            if(currentRoom) socket.emit('restartGame', currentRoom);
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if(!currentRoom) return;
+            let dir = null;
+            let playerIndex = -1;
+
+            if (isSolo) {
+                if(e.key === 'w' || e.key === 'W') { dir = 'UP'; playerIndex = 0; }
+                if(e.key === 's' || e.key === 'S') { dir = 'DOWN'; playerIndex = 0; }
+                if(e.key === 'a' || e.key === 'A') { dir = 'LEFT'; playerIndex = 0; }
+                if(e.key === 'd' || e.key === 'D') { dir = 'RIGHT'; playerIndex = 0; }
+                
+                if(e.key === 'ArrowUp') { dir = 'UP'; playerIndex = 1; }
+                if(e.key === 'ArrowDown') { dir = 'DOWN'; playerIndex = 1; }
+                if(e.key === 'ArrowLeft') { dir = 'LEFT'; playerIndex = 1; }
+                if(e.key === 'ArrowRight') { dir = 'RIGHT'; playerIndex = 1; }
+            } else {
+                if(e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') dir = 'UP';
+                if(e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') dir = 'DOWN';
+                if(e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') dir = 'LEFT';
+                if(e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') dir = 'RIGHT';
+                playerIndex = 0;
+            }
+
+            if(dir) {
+                socket.emit('changeDir', {roomCode: currentRoom, dir, playerIndex});
+                playSound('turn');
+            }
+        });
+
+        let lastScores = [0, 0];
+
+        function render(room) {
+            if (room.players.length === 2) {
+                if (room.players[0].score > lastScores[0] || room.players[1].score > lastScores[1]) {
+                    playSound('powerup');
+                }
+                lastScores = [room.players[0].score, room.players[1].score];
+                document.getElementById('p1-score').innerText = `P1 (WASD): ${room.players[0].score}`;
+                document.getElementById('p2-score').innerText = `P2 (Arrows): ${room.players[1].score}`;
+            }
+
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, 600, 600);
+            const cellSize = 20;
+
+            ctx.strokeStyle = 'rgba(0, 255, 255, 0.05)';
+            ctx.lineWidth = 1;
+            for(let i=0; i<=30; i++) {
+                ctx.beginPath(); ctx.moveTo(i*cellSize, 0); ctx.lineTo(i*cellSize, 600); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(0, i*cellSize); ctx.lineTo(600, i*cellSize); ctx.stroke();
+            }
+
+            if (room.powerup) {
+                ctx.shadowBlur = 20;
+                ctx.shadowColor = '#ffff00';
+                ctx.fillStyle = '#ffff00';
+                ctx.beginPath();
+                ctx.moveTo(room.powerup.x * cellSize + cellSize/2, room.powerup.y * cellSize + 2);
+                ctx.lineTo(room.powerup.x * cellSize + cellSize - 2, room.powerup.y * cellSize + cellSize/2);
+                ctx.lineTo(room.powerup.x * cellSize + cellSize/2, room.powerup.y * cellSize + cellSize - 2);
+                ctx.lineTo(room.powerup.x * cellSize + 2, room.powerup.y * cellSize + cellSize/2);
+                ctx.fill();
+            }
+
+            room.players.forEach(p => {
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = p.color;
+                ctx.fillStyle = p.color;
+                p.trail.forEach(t => {
+                    ctx.fillRect(t.x * cellSize + 1, t.y * cellSize + 1, cellSize - 2, cellSize - 2);
+                });
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(p.x * cellSize + 2, p.y * cellSize + 2, cellSize - 4, cellSize - 4);
+            });
+
+            if (room.state === 'countdown') {
+                ctx.shadowBlur = 0;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                ctx.fillRect(0, 0, 600, 600);
+                ctx.textAlign = 'center';
+                
+                ctx.fillStyle = '#00ffcc';
+                ctx.font = '30px monospace';
+                ctx.fillText('PLAYER 1: W A S D', 300, 200);
+                
+                ctx.fillStyle = '#ff00ff';
+                ctx.fillText('PLAYER 2: ARROW KEYS', 300, 250);
+
+                ctx.fillStyle = '#ffff00';
+                ctx.font = '20px monospace';
+                ctx.fillText('Collect yellow diamonds to boost!', 300, 310);
+
+                ctx.fillStyle = '#fff';
+                ctx.font = '50px monospace';
+                ctx.fillText('GET READY...', 300, 420);
+            }
+
+            if(room.state === 'gameover') {
+                ctx.shadowBlur = 0;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+                ctx.fillRect(0, 0, 600, 600);
+                ctx.fillStyle = '#0ff';
+                ctx.font = '50px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText('GAME OVER', 300, 260);
+                ctx.font = '30px monospace';
+                ctx.fillStyle = '#fff';
+                if(room.players.length === 2) {
+                    let p1 = room.players[0];
+                    let p2 = room.players[1];
+                    if (p1.alive) {
+                        ctx.fillStyle = p1.color;
+                        ctx.fillText("PLAYER 1 WINS", 300, 330);
+                    } else if (p2.alive) {
+                        ctx.fillStyle = p2.color;
+                        ctx.fillText("PLAYER 2 WINS", 300, 330);
+                    } else {
+                        ctx.fillText("DRAW", 300, 330);
+                    }
+                }
+                document.getElementById('restartBtn').classList.remove('hidden');
+                document.getElementById('status').innerText = '';
+            }
+        }
+    </script>
+</body>
+</html>
